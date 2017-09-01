@@ -118,15 +118,24 @@ public class CollisionDetectionManager : MonoBehaviour {
     // gib alle Buffer, Shader Resource Views und Unordered Access Views frei
     void ReleaseBuffersAndViews()
     {
-        m_Vertex_Buffer.Release();
-        m_Triangle_Buffer.Release();
-        m_ObjectsLastIndices_Buffer.Release();
-        m_BoundingBox_Buffer.Release();
-        m_GroupMinPoint_Buffer.Release();
-        m_GroupMaxPoint_Buffer.Release();
-        m_CounterTrees_Buffer.Release();
-        m_GlobalCounterTree_Buffer.Release();
-        m_TypeTree_Buffer.Release();
+        if (m_Vertex_Buffer != null)
+            m_Vertex_Buffer.Release();
+        if (m_Triangle_Buffer != null)
+            m_Triangle_Buffer.Release();
+        if (m_ObjectsLastIndices_Buffer != null)
+            m_ObjectsLastIndices_Buffer.Release();
+        if (m_BoundingBox_Buffer != null)
+            m_BoundingBox_Buffer.Release();
+        if (m_GroupMinPoint_Buffer != null)
+            m_GroupMinPoint_Buffer.Release();
+        if (m_GroupMaxPoint_Buffer != null)
+            m_GroupMaxPoint_Buffer.Release();
+        if (m_CounterTrees_Buffer != null)
+            m_CounterTrees_Buffer.Release();
+        if (m_GlobalCounterTree_Buffer != null)
+            m_GlobalCounterTree_Buffer.Release();
+        if (m_TypeTree_Buffer != null)
+            m_TypeTree_Buffer.Release();
     }
 
     void CreateSceneBuffers()
@@ -353,6 +362,8 @@ public class CollisionDetectionManager : MonoBehaviour {
     // Use this for initialization
     void Start () {
         InitComputeShaderList();
+        CreateSceneBuffers();
+        _2DArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel);
 
     }
 	

@@ -1,4 +1,4 @@
-﻿#pragma kernel CSMain
+﻿#pragma kernel main
 
 #include "0_ComputeShaderGlobals.cginc"
 
