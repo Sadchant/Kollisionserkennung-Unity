@@ -2,8 +2,8 @@
 
 #include "0_ComputeShaderGlobals.cginc"
 
-StructuredBuffer<float3> vertexBuffer : register(t0);
-StructuredBuffer<int3> triangleBuffer : register(t1);
+StructuredBuffer<float3> vertexBuffer;
+StructuredBuffer<int3> triangleBuffer;
 
 RWStructuredBuffer<BoundingBox> boundingBoxBuffer : register(u0);
 

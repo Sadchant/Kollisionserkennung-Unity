@@ -3,6 +3,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
+
+public struct CollisionObject
+{
+    public Mesh[] meshArray;
+};
+
 struct ReduceData
 {
     public int firstStepStride;
@@ -17,9 +23,9 @@ struct FillCounterTreesData
 };
 
 
-public class CollisionDetectionManager : MonoBehaviour {
+public class CollisionDetectionManager {
 
-    private List<GameObject> sceneGameObjects;
+    private List<CollisionObject> sceneCollisionObjects;
 
     private int m_VertexCount;
     private int m_TriangleCount;
@@ -48,18 +54,6 @@ public class CollisionDetectionManager : MonoBehaviour {
     FillCounterTreesData m_FillCounterTreesData;
 
 
-    public void AddObject(GameObject newObject)
-    {
-        sceneGameObjects.Add(newObject);
-        CreateVertexAndTriangleArray();
-    }
-
-    public void RemoveObject(GameObject deleteThisObject)
-    {
-        sceneGameObjects.Remove(deleteThisObject);
-        CreateVertexAndTriangleArray();
-    }
-
     void InitComputeShaderList()
     {
         m_ComputeShaderList = new List<ComputeShader>();
@@ -70,21 +64,62 @@ public class CollisionDetectionManager : MonoBehaviour {
         m_ComputeShaderList.Add(Resources.Load<ComputeShader>("ComputeShader/5_FillTypeTree"));
     }
 
+    // Use this for initialization
+    public CollisionDetectionManager () {
+        sceneCollisionObjects = new List<CollisionObject>();
+        InitComputeShaderList();
+    }
+
+    public void Shutdown()
+    {
+        ReleaseBuffers();
+    }
+
+    private void RecreateSceneData()
+    {
+        CreateVertexAndTriangleArray();
+        CreateSceneBuffers();
+        Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel);
+    }
+
+
+    public void AddObject(CollisionObject newCollisionObject)
+    {
+        sceneCollisionObjects.Add(newCollisionObject);
+        RecreateSceneData();
+    }
+
+    public void AddObjects(CollisionObject[] newCollisionObjects)
+    {
+        sceneCollisionObjects.AddRange(newCollisionObjects);
+        RecreateSceneData();
+    }
+
+    public void RemoveObject(CollisionObject deleteThisCollisionObject)
+    {
+        sceneCollisionObjects.Remove(deleteThisCollisionObject);
+        RecreateSceneData();
+    }
+
+
     // erzeugt die Arrays, die zum Initialisieren der Buffer benötigt werden
     private void CreateVertexAndTriangleArray()
     {
         //Zuerst ausrechnen, wie groß das Triangle- und das Vertex-Array sein sollte
         m_VertexCount = 0;
-        foreach (GameObject gameObject in sceneGameObjects)
+        foreach (CollisionObject collisionObject in sceneCollisionObjects)
         {
-            m_VertexCount += gameObject.GetComponent<Mesh>().vertexCount;
-            m_TriangleCount += gameObject.GetComponent<Mesh>().triangles.Length;
+            foreach(Mesh mesh in collisionObject.meshArray)
+            {
+                m_VertexCount += mesh.vertexCount;
+                m_TriangleCount += mesh.triangles.Length / 3;
+            }            
         }
 
-        m_ObjectCount = sceneGameObjects.Count;
+        m_ObjectCount = sceneCollisionObjects.Count;
 
         m_Vertices = new Vector3[m_VertexCount];
-        m_Triangles = new int[m_TriangleCount];
+        m_Triangles = new int[m_TriangleCount * 3];
         m_ObjectsLastIndices = new uint[m_ObjectCount]; // es gibt so viele Einträge wie Objekte
 
         int curAllVerticesCount = 0; // zähle alle VertexCounts für jedes Objekt zusammen
@@ -92,31 +127,36 @@ public class CollisionDetectionManager : MonoBehaviour {
         // gehe über alle Objekte
         for (int i = 0; i < m_ObjectCount; i++)
         {
-            Mesh curModel = sceneGameObjects[i].GetComponent<Mesh>();
-            int curIndexCount = curModel.triangles.Length;
-            int curVertexCount = curModel.vertexCount;
-            int[] curIndexArray = (int[])curModel.triangles.Clone();
-            // gehe über alle Vertices und kopiere die Vertices dieses Objekts in den Szenen-Vertexbuffer
-            for (int j = 0; j < curVertexCount; j++) // iteriere über jeden Vertex in modelData
+            Mesh[] curMeshArray = sceneCollisionObjects[i].meshArray;
+            foreach (Mesh curMesh in curMeshArray)
             {
-                m_Vertices[curAllVerticesCount + j] = curModel.vertices[j];
-            }
-            // gehe über alle Indices und kopiere modifizierte Indices in den Szenen-Indexbuffer
-            for (int k = 0; k < curIndexCount; k++)
-            {
-                // addiere die Menge der Vertices aller bisherigen Objekte, da die Indices auf den zusammenkopierten Vertexbuffer verweisen
-                m_Triangles[curAllIndicesCount + k] = curModel.triangles[k] + curAllVerticesCount; 
-            }
-            // schreibe außerdem den letzten Index des Objektes in m_ObjectLastIndices
-            m_ObjectsLastIndices[i] = (uint)curAllIndicesCount-1;
+                int curMeshVertexCount = curMesh.vertexCount;
+                int curMeshIndexCount = curMesh.triangles.Length;
 
-            curAllVerticesCount += curVertexCount;
-            curAllIndicesCount += curIndexCount;
+                // gehe über alle Vertices und kopiere die Vertices dieses Objekts in den Szenen-Vertexbuffer
+                for (int j = 0; j < curMeshVertexCount; j++) // iteriere über jeden Vertex in modelData
+                {
+                    m_Vertices[curAllVerticesCount + j] = curMesh.vertices[j];
+                }
+
+                // gehe über alle Indices und kopiere modifizierte Indices in den Szenen-Indexbuffer
+                for (int k = 0; k < curMeshIndexCount; k++)
+                {
+                    // addiere die Menge der Vertices aller bisherigen Objekte (Objekte, jedes Objekt hat ein MeshArray!), da die Indices auf den zusammenkopierten Vertexbuffer verweisen
+                    m_Triangles[curAllIndicesCount + k] = curMesh.triangles[k] + curAllVerticesCount;
+                }
+
+                curAllVerticesCount += curMeshVertexCount;
+                curAllIndicesCount += curMeshIndexCount;
+            }
+
+            // schreibe außerdem den letzten Index des Objektes in m_ObjectLastIndices
+            m_ObjectsLastIndices[i] = (uint)curAllIndicesCount / 3 - 1;
         }
     }
 
     // gib alle Buffer, Shader Resource Views und Unordered Access Views frei
-    void ReleaseBuffersAndViews()
+    void ReleaseBuffers()
     {
         if (m_Vertex_Buffer != null)
             m_Vertex_Buffer.Release();
@@ -141,7 +181,7 @@ public class CollisionDetectionManager : MonoBehaviour {
     void CreateSceneBuffers()
     {
         // Buffer, ShaderResourceViews und UnorderedAccessViews müssen released werden (falls etwas in ihnen ist), bevor sie neu created werden!
-        ReleaseBuffersAndViews();
+        ReleaseBuffers();
         m_Vertex_Buffer = new ComputeBuffer(m_VertexCount, sizeof(float)*3, ComputeBufferType.Default );
         m_Vertex_Buffer.SetData(m_Vertices);
         m_Triangle_Buffer = new ComputeBuffer(m_TriangleCount, sizeof(uint) * 3, ComputeBufferType.Default);
@@ -174,16 +214,21 @@ public class CollisionDetectionManager : MonoBehaviour {
         m_GlobalCounterTree_Buffer = new ComputeBuffer(m_TreeSize, sizeof(uint), ComputeBufferType.Default);
     }
 
-    private int[] _2DArrayTo1DArray(int[][] _2DArray)
+    // konvertiert ein 2D-Array, was aus x 4er-Ints besteht in ein eindimensionales Array, damit Unity es an Shader übergeben kann
+    private int[] Int4ArrayTo1DArray(int[][] _2DArray)
     {
-        int[] resultArray = new int[_2DArray.GetLength(0)* _2DArray.GetLength(1)];
-        int x = _2DArray.GetLength(0) * _2DArray.GetLength(1);
-        int y = _2DArray.Length;
-
+        int[] resultArray = new int[_2DArray.Length * 4];
+        for(int i = 0; i < _2DArray.Length; i++)
+        {
+            for (int j = 0; j<4; j++)
+            {
+                resultArray[i * 4 + j] = _2DArray[i][j];
+            }
+        }
         return resultArray;
     }
 
-    private bool Frame()
+    public void Frame()
     {
         int kernelID;
         // ####### Berechne Bounding Boxes für jedes Dreieck #######
@@ -302,12 +347,14 @@ public class CollisionDetectionManager : MonoBehaviour {
         m_CurComputeShader.SetBuffer(kernelID, "objectsLastIndices", m_ObjectsLastIndices_Buffer);
 
         m_CurComputeShader.SetInts("objectCount", m_FillCounterTreesData.objectCount);
-        m_CurComputeShader.SetInts("treeSizeInLevel", _2DArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
+        m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
+        xThreadGroups = (int)Mathf.Ceil(m_TriangleCount / 1024.0f);
+        m_CurComputeShader.Dispatch(kernelID, xThreadGroups, 1, 1);
 
-
-        //deviceContext->CSSetConstantBuffers(0, 1, &m_FillCounterTreesData_CBuffer);
-        //xThreadGroups = (int)ceil(m_TriangleCount / 1024.0f);
-        //deviceContext->Dispatch(xThreadGroups, 1, 1);
+        int[] resultArray = new int[m_CounterTreesSize];
+        m_CounterTrees_Buffer.GetData(resultArray);
+        int result = resultArray[0];
+        int result1 = resultArray[1];
 
         //// entferne die UAVs wieder von den Slots 0 - 2, damit sie wieder verwendet werden können
         //deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
@@ -353,23 +400,6 @@ public class CollisionDetectionManager : MonoBehaviour {
         //memcpy(m_Results4, MappedResource4.pData, m_TreeSize * sizeof(UINT));
         //deviceContext->Unmap(m_Result_Buffer4, 0);
         ////####### Daten von der GPU kopieren #######
-
-
-        return true;
     }
 
-
-    // Use this for initialization
-    void Start () {
-        InitComputeShaderList();
-        CreateSceneBuffers();
-        _2DArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel);
-
-    }
-	
-	// Update is called once per frame
-	void Update () {
-        Frame();
-
-    }
 }
