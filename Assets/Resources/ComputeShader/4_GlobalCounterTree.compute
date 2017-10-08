@@ -8,26 +8,34 @@
 RWStructuredBuffer<uint> counterTrees : register(u0); // Input, allerdings wird dieser Shader benutzt, 
 RWStructuredBuffer<uint> globalCounterTree : register(u1); // nur von Stelle 1 lesen, da steht der MaxPoint der Szene!
 
-cbuffer fillCounterTreesData : register(b0)
-{
-    uint4 objectCount;
-    uint4 treeSizeInLevel[SUBDIVS + 1]; // uint4, da in Constant Buffers ein Array-Eintrag immer 16 Byte hat, lese also nur von x! 
+//cbuffer ObjectCount : register(b0)
+//{
+    int objectCount;
+//};
+//cbuffer TreeSizeInLevel : register(b1)
+//{
+    int4 treeSizeInLevel[SUBDIVS + 1]; // uint4, da in Constant Buffers ein Array-Eintrag immer 16 Byte hat, lese also nur von x! 
     // (könnte man auch geschickter lösen, aber an der Stelle lieber dass bisschen Speicher verschwenden als zusätzliche Instruktionen
     // zum uin4 auseinanderbauen auszuführen)
-};
+//};
 
-[numthreads(_4_GLOBALCOUNTERTREE_XTHREADS, _4_GLOBALCOUNTERTREE_YTHREADS, _4_GLOBALCOUNTERTREE_ZTHREADS)]
+[numthreads(LINEAR_XTHREADS, LINEAR_YTHREADS, LINEAR_ZTHREADS)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
     uint id = DTid.x;
     // obligatorische Überprüfung für den Block, der "zu wenig" zu tun hat
     if (id >= treeSizeInLevel[SUBDIVS].x)
         return;
+    if (id == 0) // sollte die id 0 sein ist es die Zelle in der die gesamte Szene liegt,
+    {
+        globalCounterTree[id] = 4294967295; //trage den MaximalWert von uint ein, damit die Zelle nicht weniger Überprüfungen als ihre 8 Kinder hat
+        return;
+    }
     uint objectsInThisCellCount = 0; // wie viele Objekte besitzen Dreiecke, die in der von diesem Thread bearbeiteten Zelle liegen?
     uint boundingBoxCounts[MAXCOLLIDINGOBJECTS]; // pro Objekt die Anzahl der Dreiecke, ohne 0er, hieraus wird der letztendliche intersectionTestCount berechnet
 
     // gehe über alle Countertrees (1 pro Objekt)
-    for (uint i = 0; i < objectCount.x; i++)
+    for (uint i = 0; i < objectCount; i++)
     {
         // berechne die Id der Zelle in Countertrees, die in diesem Durchlauf verrechnet wird
         uint curID = id + i * treeSizeInLevel[SUBDIVS].x;
@@ -51,6 +59,5 @@ void main(uint3 DTid : SV_DispatchThreadID)
             intersectionTestCount += boundingBoxCounts[j] * boundingBoxCounts[k];
         }
     }
-    // speichere das Ergebnis im Output-Array
-    globalCounterTree[id] = intersectionTestCount;
+    globalCounterTree[id] = intersectionTestCount; // speichere das Ergebnis im Output-Array
 }

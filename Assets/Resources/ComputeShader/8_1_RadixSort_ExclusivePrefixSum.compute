@@ -1,0 +1,86 @@
+﻿#pragma kernel main
+
+#include "0_ComputeShaderGlobals.cginc"
+
+
+RWStructuredBuffer<CellTrianglePair> cellTrianglePairs : register(u0);
+RWStructuredBuffer<SortIndices> sortIndices : register(u1);
+
+groupshared SortIndices groupSortIndices[2048];
+
+//cbuffer radixSort_ExclusivePrefixSum_Data : register(b0)
+//{
+    int loops; // wie viele for-Durchläufe hat dieser Shader
+    int read2BitsFromHere; // -1 falls die Bits schon ausgelesen wurden, ansonsten: an dieser Position werden 2 Bits genutzt um die SortIndices initial zu befüllen
+    int startCombineDistance;
+//}
+
+// sollten die SortIndices noch nicht befüllt sein, lese die Bits aus cellTrianglePairs.cellID aus und schreibe die Werte in sortIndices
+// ansonsten führe den einen Teilbereich des ersten Teils der exclusive Prefix Sum aus (oder den gesamten, wenn der Input klein genug ist und nicht
+// über Dispatches gesynct werden muss
+[numthreads(LINEAR_XTHREADS, LINEAR_YTHREADS, LINEAR_ZTHREADS)]
+void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
+{
+    uint id = DTid.x;
+    uint scaledGroupLocalID = GTid.x * 2;
+    // Größe des Buffers ermitteln
+    uint cellTrianglePairsLength, stride, sortIndicesLength;
+    cellTrianglePairs.GetDimensions(cellTrianglePairsLength, stride);
+    sortIndices.GetDimensions(sortIndicesLength, stride);
+    sortIndicesLength -= 1; // die letzte Stelle wird seperat befüllt
+
+    uint threadDistance = startCombineDistance * 2; // wie weit sind 2 Threads bezogen auf den Input, den sie auslesen auseinander
+    uint dataID = id * threadDistance + threadDistance - 1; // berechne aus id und threadDistance die ID, mit der in diesem Thread auf die Daten zugeriffen wird
+    if (read2BitsFromHere != -1) // wenn in read2BitsFromHere ein anderer Wert als -1 steht, muss SortIndices inital befüllt werden
+    {
+        // das Ergebnis vom initialen Hochzählen kommt direkt in den groupshared Memory, um danach den ersten Teil der exclusive Prefix Sum im groupsharedMemory durchzuführen
+        groupSortIndices[scaledGroupLocalID] = getSortIndicesFromInput(id * 2, cellTrianglePairsLength, (uint) read2BitsFromHere, cellTrianglePairs);
+        groupSortIndices[scaledGroupLocalID + 1] = getSortIndicesFromInput(id * 2 + 1, cellTrianglePairsLength, (uint) read2BitsFromHere, cellTrianglePairs);
+    }
+    else
+    {
+        SortIndices emptySortIndices;
+        emptySortIndices.array[0] = 0;
+        emptySortIndices.array[1] = 0;
+        emptySortIndices.array[2] = 0;
+        emptySortIndices.array[3] = 0;
+        // sollten keine validen Daten an der Stelle sein, wird ein leeres Array in groupSortIndices geschrieben
+        if (dataID > cellTrianglePairsLength)
+            groupSortIndices[scaledGroupLocalID + 1] = emptySortIndices;
+        else // ansonsten lese mit der schon berechneten dataID das zu diesem Thread gehörende SortIndices-Array aus und kopiere es in den groupshared Memory
+            groupSortIndices[scaledGroupLocalID + 1] = sortIndices[dataID];
+        // jeder Thread liest zwei Werte ein, der zweite ist an der Stelle dataID - startCombineDistance (gehe die Kombinier-Distanz zurück, das ist das andere Element)
+        if (dataID > cellTrianglePairsLength - startCombineDistance)
+            groupSortIndices[scaledGroupLocalID] = emptySortIndices;
+        else
+            groupSortIndices[scaledGroupLocalID] = sortIndices[dataID - startCombineDistance];
+    }
+    GroupMemoryBarrierWithGroupSync(); // nach jeder Manipulation des groupshared Memory muss gesynct werden
+    uint curCombineDistance = 1;
+    // die erste Hälfte der exclusive Prefix Sum ist ein naiver Reduce, der loops Durchläufe hat (danach muss über einen Dispatch gesynct werden)
+    for (uint j = 0; j < loops; j++)
+    {
+        // es können mehr Threads gespawnt werden (durch die 1024 Threads/Gruppe) als die exclusive Prefix Sum lang ist, also bearbeite nur valide Elemente
+        if (dataID < sortIndicesLength)
+        {
+            // sortiere die Threads aus, die in diesem Durchlauf nicht arbeiten
+            if (scaledGroupLocalID % (curCombineDistance * 2) == 0) // curCombineDistance * 2 weil die groupID auch gescaled wurde
+            {
+                uint curID = scaledGroupLocalID + curCombineDistance * 2 - 1; // berechne die ID, mit der auf den groupshared memory zugeriffen wird
+                for (uint k = 0; k < 4; k++) // bearbeite alle 4 Array-Einträge (es ist ein 2Bit-Pass, also 4 Einträge)
+                {
+                    // es werden immer zwei Elemente addiert und an der hinteren Stelle abgespeichert
+                    groupSortIndices[curID].array[k] += groupSortIndices[curID - curCombineDistance].array[k];
+                }
+                curCombineDistance *= 2; // die Kombinierdistanz ist beim nächsten Durchlauf doppelt so groß
+            }
+        }
+        GroupMemoryBarrierWithGroupSync(); // synce am Ende von jedem for-Durchlauf
+    }
+    // am Ende wird der groupsharedMemory wieder zurückopiert in den Buffer an die Stellen, aus denen an Anfang ausgelesen wurde
+    if (dataID < sortIndicesLength)
+    {
+        sortIndices[dataID] = groupSortIndices[scaledGroupLocalID + 1];
+        sortIndices[dataID - startCombineDistance] = groupSortIndices[scaledGroupLocalID];
+    }
+}
