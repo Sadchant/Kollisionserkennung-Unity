@@ -6,9 +6,9 @@
 
 RWStructuredBuffer<uint> globalCounterTree : register(u0);
 RWStructuredBuffer<uint> typeTree : register(u1);
-//cbuffer TreeSizeInLevels : register(b0)
+//cbuffer treeSizeInLevel : register(b0)
 //{ // nur die erste Stelle von den uint4 lesen!
-    int4 treeSizeInLevels[SUBDIVS + 1];
+    int4 treeSizeInLevel[SUBDIVS + 1];
 //};
 //cbuffer StartLevel : register(b1)
 //{
@@ -41,16 +41,16 @@ void main(uint3 DTid : SV_DispatchThreadID)
             uint3 curParent3DID = DTid / threadAliveNumber; // die 3D-ID der Elternzelle, die aktuell bearbeitet wird
             uint curParentRes = pow(2, curLevel); // die Auflösung des Levels, in der der die aktuell bearbeitete Elternzelle liegt
             uint curOffset;
-            if (curLevel == 0) // damit nicht auf treeSizeInLevels[-1] zugegriffen wird
+            if (curLevel == 0) // damit nicht auf treeSizeInLevel[-1] zugegriffen wird
                 curOffset = 0;
-            else // der Offset wird mit dem aktuellen Level aus treeSizeInLevels geholt (treeSizeInLevels[curLevel-1] beinhaltet die Größe des Baums bis zum aktuellen Level)
-                curOffset = treeSizeInLevels[curLevel - 1].x;
+            else // der Offset wird mit dem aktuellen Level aus treeSizeInLevel geholt (treeSizeInLevel[curLevel-1] beinhaltet die Größe des Baums bis zum aktuellen Level)
+                curOffset = treeSizeInLevel[curLevel - 1].x;
             uint curParent1DID = get1DID(curParent3DID, curParentRes, curOffset); // mit der 1D-ID kann auf die Buffer zugegriffen werden, die linear aufgebaut sind
             uint curParentCount = globalCounterTree[curParent1DID]; // die Anzahl an ÜberschneidungsTests für die aktelle Zelle
             uint curChildsCount = 0; // die Anzahl an Überschneidungstests für die 8 Kind-Zellen
             uint3 bottomLeftChildID = curParent3DID * 2; // die ID der KindZelle- die räumlich gesehen unten links vorne in der Elternzelle liegt
             uint curChildRes = curParentRes * 2; // die Auflösung des Levels, auf dem die Kind-Zellen liegen
-            uint curChildOffset = treeSizeInLevels[curLevel].x; // der Offset für die Berechnung der 1D-IDs der Kind-Zellen
+            uint curChildOffset = treeSizeInLevel[curLevel].x; // der Offset für die Berechnung der 1D-IDs der Kind-Zellen
             uint curChilds1DIDs[8]; // merke dir die 1D-IDs der Kind-Zellen in einem Array, da die 1D-IDs später noch einmal benötigt werden und nicht doppelt berechnet werden sollen
             for (uint x = 0; x < 2; x++) // es gibt 2x2x2 Kindzellen
             {

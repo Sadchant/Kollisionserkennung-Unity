@@ -7,6 +7,8 @@ using System.Linq;
 public struct CollisionObject
 {
     public Mesh[] meshArray;
+    public Matrix4x4[] matrices;
+    public Transform[] transforms;
 };
 
 struct ReduceData
@@ -39,12 +41,18 @@ public class CollisionDetectionManager {
     int m_IntersectionCentersCount;
     bool m_CopyTo1;
 
+    private int m_SubObjectCount;
+
+
     List<ComputeShader> m_ComputeShaderList;
     private ComputeShader m_CurComputeShader;
+
+    private ComputeShader m_UpdateVertiecesComputeShader;
 
     private Vector3[] m_Vertices;
     private int[] m_Triangles;
     private uint[] m_ObjectsLastIndices;
+    private uint[] m_SubObjectsLastVertexIndices;
 
     private ComputeBuffer m_Vertex_Buffer; // alle Punkte der Szene, deren Objekte kollidieren
     private ComputeBuffer m_Triangle_Buffer; // alle Dreiecke der Szene, deren Objekte kollidieren
@@ -63,11 +71,15 @@ public class CollisionDetectionManager {
     private ComputeBuffer m_IntersectingObjects_Buffer; // enthält für jedes Objekt einen Eintrag, ob es mit anderen kollidiert
     private ComputeBuffer m_IntersectCenters_Buffer; // enthält alle Mittelpunkte von Dreiecks-Kollisionen
 
+    private ComputeBuffer m_SubObjectsLastVertexIndices_Buffer; // enthält alle Mittelpunkte von Dreiecks-Kollisionen
+
+
     FillCounterTreesData m_FillCounterTreesData;
 
 
     void InitComputeShaderList()
     {
+        m_UpdateVertiecesComputeShader = Resources.Load<ComputeShader>("ComputeShader/0_UpdateObjectVertices");
         m_ComputeShaderList = new List<ComputeShader>();
         m_ComputeShaderList.Add(Resources.Load<ComputeShader>("ComputeShader/1_BoundingBoxes"));
         m_ComputeShaderList.Add(Resources.Load<ComputeShader>("ComputeShader/2_SceneBoundingBox"));
@@ -130,20 +142,24 @@ public class CollisionDetectionManager {
     {
         //Zuerst ausrechnen, wie groß das Triangle- und das Vertex-Array sein sollte
         m_VertexCount = 0;
+        int subObjectCounter = 0;
         foreach (CollisionObject collisionObject in sceneCollisionObjects)
         {
             foreach(Mesh mesh in collisionObject.meshArray)
             {
                 m_VertexCount += mesh.vertexCount;
                 m_TriangleCount += mesh.triangles.Length / 3;
+                subObjectCounter++;
             }            
         }
+        m_SubObjectCount = subObjectCounter;
 
         m_ObjectCount = sceneCollisionObjects.Count;
 
         m_Vertices = new Vector3[m_VertexCount];
         m_Triangles = new int[m_TriangleCount * 3];
         m_ObjectsLastIndices = new uint[m_ObjectCount]; // es gibt so viele Einträge wie Objekte
+        m_SubObjectsLastVertexIndices = new uint[m_SubObjectCount]; // es gibt so viele Einträge wie Objekte
 
         int curAllVerticesCount = 0; // zähle alle VertexCounts für jedes Objekt zusammen
         int curAllIndicesCount = 0; // zähle alle IndexCounts für jedes Objekt zusammen
@@ -171,6 +187,7 @@ public class CollisionDetectionManager {
 
                 curAllVerticesCount += curMeshVertexCount;
                 curAllIndicesCount += curMeshIndexCount;
+                m_SubObjectsLastVertexIndices[i] = (uint)curAllVerticesCount - 1;
             }
 
             // schreibe außerdem den letzten Index des Objektes in m_ObjectLastIndices
@@ -217,6 +234,8 @@ public class CollisionDetectionManager {
             m_IntersectingObjects_Buffer.Release();
         if (m_IntersectCenters_Buffer != null)
             m_IntersectCenters_Buffer.Release();
+        if (m_SubObjectsLastVertexIndices_Buffer != null)
+            m_SubObjectsLastVertexIndices_Buffer.Release();        
 }
 
     void CreateSceneBuffers()
@@ -262,6 +281,10 @@ public class CollisionDetectionManager {
         m_TrianglePairs_Buffer = new ComputeBuffer(m_TrianglePairsCount, sizeof(uint)*4, ComputeBufferType.Counter);
         m_IntersectingObjects_Buffer = new ComputeBuffer(m_ObjectCount, sizeof(uint), ComputeBufferType.Default);
         m_IntersectCenters_Buffer = new ComputeBuffer(m_IntersectionCentersCount, sizeof(float)*3, ComputeBufferType.Counter);
+
+        m_SubObjectsLastVertexIndices_Buffer = new ComputeBuffer(m_SubObjectCount, sizeof(uint), ComputeBufferType.Default);
+        m_SubObjectsLastVertexIndices_Buffer.SetData(m_SubObjectsLastVertexIndices);
+
     }
 
     // konvertiert ein 2D-Array, was aus x 4er-Ints besteht in ein eindimensionales Array, damit Unity es an Shader übergeben kann
@@ -278,7 +301,41 @@ public class CollisionDetectionManager {
         return resultArray;
     }
 
+    // ******* 0. Wende eine Manipulation eines Objekts auf die dazugehörigen Vertices an *******
+    void _0_UpdateObjectVertices(int objectID, int subObjectID, Matrix4x4 updateMatrix)
+    {
+        Mesh updateThisMesh = sceneCollisionObjects[objectID].meshArray[subObjectID];
+        int meshSize = updateThisMesh.vertexCount;
+        m_CurComputeShader = m_UpdateVertiecesComputeShader;
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
+        int xThreadGroups = (int)Mathf.Ceil(meshSize / 1024.0f);
+
+        m_CurComputeShader = m_UpdateVertiecesComputeShader;
+
+        m_CurComputeShader.SetBuffer(kernelID, "vertexBuffer", m_Vertex_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "objectsLastVertexIndices", m_SubObjectsLastVertexIndices_Buffer);
+
+        float[] matrixArray = new float[]
+        {
+        updateMatrix[0,0], updateMatrix[1, 0], updateMatrix[2, 0],
+        updateMatrix[0,1], updateMatrix[1, 1], updateMatrix[2, 1],
+        updateMatrix[0,2], updateMatrix[1, 2], updateMatrix[2, 2],
+        updateMatrix[0,3], updateMatrix[1, 3], updateMatrix[2, 3],
+        };
+        m_CurComputeShader.SetFloats("updateMatrix", matrixArray);
+
+        int subObjectGlobalID = 0;
+        for (int i= 0; i < objectID; i++)
+        {
+            subObjectGlobalID += sceneCollisionObjects[i].meshArray.Length;
+        }
+        subObjectGlobalID += subObjectID;
+        m_CurComputeShader.SetInt("subObjectID", subObjectGlobalID);
+
+
+        m_CurComputeShader.Dispatch(kernelID, xThreadGroups, 1, 1);
+    }
 
     // ******* 1. Berechne Bounding Boxes für jedes Dreieck *******
     void _1_BoundingBoxes()
@@ -385,24 +442,30 @@ public class CollisionDetectionManager {
     // ******* 4.Befülle den GlobalCounterTree mit den Daten, wie viele Überschneidungstets es pro Zelle gibt *******
     void _4_GlobalCounterTree()
     {
-        m_curComputeShader = m_ComputeShaderVector[3];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[3];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CounterTrees_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_GlobalCounterTree_UAV, 0);
-        deviceContext->CSSetConstantBuffers(0, 1, &m_ObjectCount_CBuffer);
-        deviceContext->CSSetConstantBuffers(1, 1, &m_TreeSizeInLevel_CBuffer);
-        int xThreadGroups = (int)ceil(m_TreeSize / 1024.0f);
-        deviceContext->Dispatch(xThreadGroups, 1, 1);
+        m_CurComputeShader.SetBuffer(kernelID, "counterTrees", m_CounterTrees_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "globalCounterTree", m_GlobalCounterTree_Buffer);
 
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
+        m_CurComputeShader.SetInts("objectCount", m_FillCounterTreesData.objectCount);
+        m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
+
+        int xThreadGroups = (int)Mathf.Ceil(m_TreeSize / 1024.0f);
+
+        m_CurComputeShader.Dispatch(kernelID, xThreadGroups, 1, 1);
     }
 
     // ******* 5. Trage im GlobalCounterTree die Werte der optimierten Struktur ein und speichere die Struktur in TypeTree *******
     void _5_FillTypeTree()
     {
-        m_curComputeShader = m_ComputeShaderVector[4];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[4];
+        int kernelID = m_CurComputeShader.FindKernel("main");
+
+        m_CurComputeShader.SetBuffer(kernelID, "globalCounterTree", m_GlobalCounterTree_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "typeTree", m_TypeTree_Buffer);
+        m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
+
 
         deviceContext->CSSetUnorderedAccessViews(0, 1, &m_GlobalCounterTree_UAV, 0);
         deviceContext->CSSetUnorderedAccessViews(1, 1, &m_TypeTree_UAV, 0);

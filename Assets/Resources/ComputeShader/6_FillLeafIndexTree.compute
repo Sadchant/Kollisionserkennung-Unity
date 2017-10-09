@@ -5,9 +5,9 @@
 RWStructuredBuffer<uint> typeTree : register(u0);
 RWStructuredBuffer<uint> leafIndexTree : register(u1);
 
-//cbuffer TreeSizeInLevels : register(b0)
+//cbuffer treeSizeInLevel : register(b0)
 //{ // nur die erste Stelle von den uint4 lesen!
-    int4 treeSizeInLevels[SUBDIVS + 1];
+    int4 treeSizeInLevel[SUBDIVS + 1];
 //};
 //cbuffer StartLevel : register(b1)
 //{
@@ -35,17 +35,17 @@ void main(uint3 DTid : SV_DispatchThreadID)
             uint3 curParent3DID = DTid / threadAliveNumber; // die 3D-ID im Grid der aktuell bearbeiteten Zelle
             uint curParentRes = pow(2, curLevel); // die Auflösung des gerade bearbeiteten Levels
             uint curParentOffset;
-            if (curLevel == 0) // damit nicht auf treeSizeInLevels[-1] zugegriffen wird
+            if (curLevel == 0) // damit nicht auf treeSizeInLevel[-1] zugegriffen wird
                 curParentOffset = 0;
             else
-                curParentOffset = treeSizeInLevels[curLevel - 1].x; // das Offset im Aktuell bearbeiteten Level um die 1D-ID zu berechnen
+                curParentOffset = treeSizeInLevel[curLevel - 1].x; // das Offset im Aktuell bearbeiteten Level um die 1D-ID zu berechnen
             uint curParent1DID = get1DID(curParent3DID, curParentRes, curParentOffset); //berechne die ID-ID
             uint curParentType = typeTree[curParent1DID]; // hole den Typ der Elternzelle
             uint curParentLeafIndex = leafIndexTree[curParent1DID];
 
             uint3 bottomLeftChildID = curParent3DID * 2; // die ID der KindZelle- die räumlich gesehen unten links vorne in der Elternzelle liegt
             uint curChildsRes = curParentRes * 2; // die Auflösung ist im Kinderlevel doppelt so hoch
-            uint curChildsOffset = treeSizeInLevels[curLevel].x; // nehme den Offset-Wert einen größer als vom aktuellen Wert, um aufs Child-Offset zu kommen
+            uint curChildsOffset = treeSizeInLevel[curLevel].x; // nehme den Offset-Wert einen größer als vom aktuellen Wert, um aufs Child-Offset zu kommen
             
             for (uint x = 0; x < 2; x++) // es gibt 2x2x2 Kindzellen
             {

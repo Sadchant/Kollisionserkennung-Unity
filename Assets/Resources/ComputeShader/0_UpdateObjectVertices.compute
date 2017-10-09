@@ -1,0 +1,26 @@
+﻿#pragma kernel main
+
+RWStructuredBuffer<float3> vertexBuffer;
+StructuredBuffer<uint> objectsLastVertexIndices : register(t0);
+
+float4x3 updateMatrix;
+int subObjectID;
+
+[numthreads(LINEAR_XTHREADS, LINEAR_YTHREADS, LINEAR_ZTHREADS)]
+void main(uint3 DTid : SV_DispatchThreadID)
+{
+    uint id = DTid.x;
+
+    uint firstIndex = objectsLastVertexIndices[subObjectID - 1] + 1;
+    uint lastIndex = objectsLastVertexIndices[subObjectID];
+
+
+    uint dataID = id + firstIndex;
+
+    if (dataID>lastIndex)
+        return;
+    float3 vertex = vertexBuffer[dataID];
+    vertex = mul(updateMatrix, vertex);
+    vertexBuffer[dataID] = vertex;
+
+}
