@@ -2,7 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-
+using System;
 
 public struct CollisionObject
 {
@@ -22,6 +22,13 @@ struct FillCounterTreesData
 {
     public int[] objectCount;
     public int[][] treeSizeInLevel;
+};
+
+struct CellTrianglePair
+{
+    uint cellID;
+    uint triangleID;
+    uint objectID;
 };
 
 
@@ -54,6 +61,8 @@ public class CollisionDetectionManager {
     private uint[] m_ObjectsLastIndices;
     private uint[] m_SubObjectsLastVertexIndices;
 
+    private CellTrianglePair[] m_CellTrianglePairs_Zero;
+
     private ComputeBuffer m_Vertex_Buffer; // alle Punkte der Szene, deren Objekte kollidieren
     private ComputeBuffer m_Triangle_Buffer; // alle Dreiecke der Szene, deren Objekte kollidieren
     private ComputeBuffer m_ObjectsLastIndices_Buffer; // die Indices im Dreieck-Buffer, die das letzte Dreieck eines Objektes markieren
@@ -73,6 +82,8 @@ public class CollisionDetectionManager {
 
     private ComputeBuffer m_SubObjectsLastVertexIndices_Buffer; // enthält alle Mittelpunkte von Dreiecks-Kollisionen
 
+    uint[] m_Results10_1_IntersectingObjects; // wird von der GPU befüllt!
+    Vector3[] m_Results10_2_IntersectionPoints; // wird von der GPU befüllt!
 
     FillCounterTreesData m_FillCounterTreesData;
 
@@ -285,6 +296,8 @@ public class CollisionDetectionManager {
         m_SubObjectsLastVertexIndices_Buffer = new ComputeBuffer(m_SubObjectCount, sizeof(uint), ComputeBufferType.Default);
         m_SubObjectsLastVertexIndices_Buffer.SetData(m_SubObjectsLastVertexIndices);
 
+        m_CellTrianglePairs_Zero = new CellTrianglePair[m_CellTrianglePairsCount];
+        Array.Clear(m_CellTrianglePairs_Zero, 0, m_CellTrianglePairsCount);
     }
 
     // konvertiert ein 2D-Array, was aus x 4er-Ints besteht in ein eindimensionales Array, damit Unity es an Shader übergeben kann
@@ -467,56 +480,48 @@ public class CollisionDetectionManager {
         m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
 
 
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_GlobalCounterTree_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_TypeTree_UAV, 0);
-        deviceContext->CSSetConstantBuffers(0, 1, &m_TreeSizeInLevel_CBuffer);
-
-
         int _3DGroupCount, curStartLevel, curLevelResolution;
         // es gibt immer einen Level mehr als SUBDIVS, also wird mit dem Index SUBDIVS auf den letzten Level zugegriffen,
         // wir suchen den vorletzten Level, also SUBDIVS - 1!
-        curStartLevel = SUBDIVS - 1;
+        curStartLevel = Constants.SUBDIVS - 1;
         while (curStartLevel >= 0)
         {
-            curLevelResolution = (int)pow(8, curStartLevel); // 8 hoch den aktuellen Level ergibt die Auflösung für den Level
+            curLevelResolution = (int)Mathf.Pow(8, curStartLevel); // 8 hoch den aktuellen Level ergibt die Auflösung für den Level
                                                              // die dritte Wurzel von der aktuellen Auflösung geteilt durch 512 ergibt die Anzahl an Gruppen die erzeugt werden müssen pro Dimension
-            _3DGroupCount = (int)ceil(pow(curLevelResolution / 512.0, 1.0 / 3.0));
+            _3DGroupCount = (int)Mathf.Ceil(Mathf.Pow(curLevelResolution / 512.0f, 1.0f / 3.0f));
 
             // Constant Buffer updaten
-            SingleUINT s_StartLevel = { (UINT)curStartLevel };
-            deviceContext->UpdateSubresource(m_StartLevel_CBuffer, 0, NULL, &s_StartLevel, 0, 0);
-            deviceContext->CSSetConstantBuffers(1, 1, &m_StartLevel_CBuffer);
+            m_CurComputeShader.SetInt("startLevel", curStartLevel);
 
-            deviceContext->Dispatch(_3DGroupCount, _3DGroupCount, _3DGroupCount);
+            m_CurComputeShader.Dispatch(kernelID, _3DGroupCount, _3DGroupCount, _3DGroupCount);
 
             curStartLevel -= 4; // der Shader kann mit 512 Threads / Gruppe die Eingabemenge um die Größe 4 reduzieren
         }
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-
     }
 
     // ******* 6. Ziehe die Indexe der Zellen bis aufs unterste Level, die Blattzellen sind *******
     void _6_FillLeafIndexTree()
     {
-        m_curComputeShader = m_ComputeShaderVector[5];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[5];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_TypeTree_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_LeafIndexTree_UAV, 0);
-        deviceContext->CSSetConstantBuffers(0, 1, &m_TreeSizeInLevel_CBuffer);
+        m_CurComputeShader.SetBuffer(kernelID, "typeTree", m_TypeTree_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "leafIndexTree", m_LeafIndexTree_Buffer);
+
+        m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
 
 
         int _3DGroupCount, curStartLevel, curLevelResolution, firstDispatchLoops, curLoops;
         bool firstStep = true;
         // berechne curLoops, für den ersten Dispatch ist das wichtig!
-        firstDispatchLoops = SUBDIVS % 4;
+        firstDispatchLoops = Constants.SUBDIVS % 4;
         if (firstDispatchLoops == 0)
             firstDispatchLoops = 4;
 
         // es gibt immer einen Level mehr als SUBDIVS, also wird mit dem Index SUBDIVS auf den letzten Level zugegriffen,
         // wir suchen den vorletzten Level, also SUBDIVS - 1!
         curStartLevel = 0;
-        while (curStartLevel < SUBDIVS)
+        while (curStartLevel < Constants.SUBDIVS)
         {
             if (firstStep)
             {
@@ -528,19 +533,15 @@ public class CollisionDetectionManager {
 
             // rechne curStartLevel + 4, da die Resolution benutzt wird um zu ermitteln, wie viele Threads gespawnt werden sollen
             // es werden aber so viele Threads gebraucht, wie es Zellen im viertnächsten Level gibt
-            curLevelResolution = (int)pow(8, curStartLevel + 3); // 8 hoch den aktuellen Level ergibt die Auflösung für den Level
+            curLevelResolution = (int)Mathf.Pow(8, curStartLevel + 3); // 8 hoch den aktuellen Level ergibt die Auflösung für den Level
                                                                  // die dritte Wurzel von der aktuellen Auflösung geteilt durch 512 ergibt die Anzahl an Gruppen die erzeugt werden müssen pro Dimension
-            _3DGroupCount = (int)ceil(pow(curLevelResolution / 512.0, 1.0 / 3.0));
+            _3DGroupCount = (int)Mathf.Ceil(Mathf.Pow(curLevelResolution / 512.0f, 1.0f / 3.0f));
 
             // Constant Buffer updaten
-            SingleUINT s_StartLevel = { (UINT)curStartLevel };
-            SingleUINT s_Loops = { (UINT)curLoops };
-            deviceContext->UpdateSubresource(m_StartLevel_CBuffer, 0, NULL, &s_StartLevel, 0, 0);
-            deviceContext->UpdateSubresource(m_Loops_CBuffer, 0, NULL, &s_Loops, 0, 0);
-            deviceContext->CSSetConstantBuffers(1, 1, &m_StartLevel_CBuffer);
-            deviceContext->CSSetConstantBuffers(2, 1, &m_Loops_CBuffer);
+            m_CurComputeShader.SetInt("startLevel", curStartLevel);
+            m_CurComputeShader.SetInt("loops", curLoops);
 
-            deviceContext->Dispatch(_3DGroupCount, _3DGroupCount, _3DGroupCount);
+            m_CurComputeShader.Dispatch(kernelID, _3DGroupCount, _3DGroupCount, _3DGroupCount);
 
             curStartLevel += curLoops; // der Shader kann mit 512 Threads / Gruppe die Eingabemenge um die Größe 4 reduzieren
         }
@@ -549,33 +550,24 @@ public class CollisionDetectionManager {
     // ******* 7. Befülle Countertrees mit den Daten für jedes Objekt *******
     void _7_CellTrianglePairs()
     {
-        m_curComputeShader = m_ComputeShaderVector[6];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[6];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
-        UINT zero = 0;
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_BoundingBoxes_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_GroupMinPoints_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_GroupMaxPoints_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(3, 1, &m_GlobalCounterTree_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(4, 1, &m_LeafIndexTree_UAV, 0);
+        m_CurComputeShader.SetBuffer(kernelID, "boundingBoxes", m_BoundingBox_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "sceneMinPoints", m_GroupMinPoint_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "sceneMaxPoints", m_GroupMaxPoint_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "globalCounterTree", m_GlobalCounterTree_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "leafIndexTree", m_LeafIndexTree_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairs_Buffer);
+        m_CellTrianglePairs_Buffer.SetCounterValue(0);
 
-        deviceContext->CSSetUnorderedAccessViews(5, 1, &m_CellTrianglePairs_UAV, &zero);
+        m_CurComputeShader.SetBuffer(kernelID, "objectsLastIndices", m_ObjectsLastIndices_Buffer);
 
-        deviceContext->CSSetShaderResources(0, 1, &m_ObjectsLastIndices_SRV);
+        m_CurComputeShader.SetInt("objectCount", m_ObjectCount);
+        m_CurComputeShader.SetInts("treeSizeInLevel", Int4ArrayTo1DArray(m_FillCounterTreesData.treeSizeInLevel));
 
-        deviceContext->CSSetConstantBuffers(0, 1, &m_ObjectCount_CBuffer);
-        deviceContext->CSSetConstantBuffers(1, 1, &m_TreeSizeInLevel_CBuffer);
-
-        int xThreadGroups = (int)ceil(m_TriangleCount / 1024.0f);
-        deviceContext->Dispatch(xThreadGroups, 1, 1);
-
-        // entferne die UAVs wieder von den Slots 0 - 2, damit sie wieder verwendet werden können
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(3, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(4, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(5, 1, &m_NULL_UAV, 0);
+        int xThreadGroups = (int)Mathf.Ceil(m_TriangleCount / 1024.0f);
+        m_CurComputeShader.Dispatch(kernelID, xThreadGroups, 1, 1);
     }
 
     // ******* 8. Sortiere cellTrianglePairs nach Zellen-IDs *******
@@ -589,78 +581,87 @@ public class CollisionDetectionManager {
         while (read2BitsFromHere < 22)
         {
             // ####################################################_8_1_####################################################
-            m_curComputeShader = m_ComputeShaderVector[7];
-            deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+            m_CurComputeShader = m_ComputeShaderList[7];
+            int kernelID = m_CurComputeShader.FindKernel("main");
 
             if (backBufferIsInput)
-                deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CellTrianglePairsBackBuffer_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairsBackBuffer_Buffer);
             else
-                deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CellTrianglePairs_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairs_Buffer);
 
-            deviceContext->CSSetUnorderedAccessViews(1, 1, &m_SortIndices_UAV, 0);
+            m_CurComputeShader.SetBuffer(kernelID, "sortIndices", m_SortIndices_Buffer);
+
 
             int _1_curInputSize = sortIndicesCountPow2;
             int _1_curWorkSize = _1_curInputSize / 2;
-            UINT _1_curLoops;
-            UINT _1_combineDistance = 1;
+            int _1_curLoops;
+            int _1_combineDistance = 1;
             bool readFromInput = true;
             int curRead2BitsFromHere; // hier wird entweder read2BitsFromHere eingetragen oder -1, wenn es der erste Durchgang ist
+            int groupCount = 0;
             while (_1_curWorkSize > 2)
             {
-                int groupCount = (int)ceil(_1_curWorkSize / 1024.0f);
+                groupCount = (int)Mathf.Ceil(_1_curWorkSize / 1024.0f);
                 if (_1_curWorkSize >= 1024)
                     _1_curLoops = 11; // 11 Druchläufe verkleinern 1024 auf 1, wir wollen lediglich im letzten Durchlauf auf 2 verkleinern, wichtiger Unterschied!, also hier 11 statt 10
                 else
-                    _1_curLoops = (UINT)log2(_1_curInputSize) - 1; // weil bei 2 Elementen aufgehört werden kann, laufe einmal weniger (ansonsten wäre es bis 1 Element gegangen)
+                    _1_curLoops = (int)Log2(_1_curInputSize) - 1; // weil bei 2 Elementen aufgehört werden kann, laufe einmal weniger (ansonsten wäre es bis 1 Element gegangen)
                 if (!readFromInput) // sollte es der erste Durchlauf sein, müssen die Bits eingelesen werden, dem Shader wird curRead2BitsFromHere = -1 übergeben
                     curRead2BitsFromHere = -1;
                 else // ansonsten wurden die Bits schon eingelesen und die relevanten read2BitsFromHere werden an den Shader übergeben
                     curRead2BitsFromHere = read2BitsFromHere;
-                RadixSort_ExclusivePrefixSumData radixSort_ExclusivePrefixSum_Data = { _1_curLoops, curRead2BitsFromHere, _1_combineDistance };
-                deviceContext->UpdateSubresource(m_RadixSort_ExclusivePrefixSumData_CBuffer, 0, NULL, &radixSort_ExclusivePrefixSum_Data, 0, 0);
-                deviceContext->CSSetConstantBuffers(0, 1, &m_RadixSort_ExclusivePrefixSumData_CBuffer);
-                deviceContext->Dispatch(groupCount, 1, 1);
+
+                m_CurComputeShader.SetInt("loops", _1_curLoops);
+                m_CurComputeShader.SetInt("read2BitsFromHere", curRead2BitsFromHere);
+                m_CurComputeShader.SetInt("startCombineDistance", _1_combineDistance);
+
+                m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
+
                 _1_curInputSize /= 2048;
                 _1_curWorkSize = _1_curInputSize / 2;
                 _1_combineDistance *= 2048;
                 readFromInput = false;
             }
 
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-            deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-
             // ####################################################_8_2_####################################################
 
             // Phase 2 der exklusive Prefix Summe
-            m_curComputeShader = m_ComputeShaderVector[8];
-            deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+            m_CurComputeShader = m_ComputeShaderList[8];
+            kernelID = m_CurComputeShader.FindKernel("main");
 
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_SortIndices_UAV, 0);
+            m_CurComputeShader.SetBuffer(kernelID, "sortIndices", m_SortIndices_Buffer);
+
             if (backBufferIsInput)
-                deviceContext->CSSetUnorderedAccessViews(1, 1, &m_CellTrianglePairsBackBuffer_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairsBackBuffer_Buffer);
             else
-                deviceContext->CSSetUnorderedAccessViews(1, 1, &m_CellTrianglePairs_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairs_Buffer);
 
-            unsigned long long _2_curInputSize;
-            UINT _2_curLoops, _2_curThreadDistance/*, _2_curStartCombineDistance*/;
+            ulong _2_curInputSize;
+            int _2_curLoops, _2_curThreadDistance/*, _2_curStartCombineDistance*/;
 
             // ermittle die InputSize des ersten Dispatches
-            _2_curInputSize = sortIndicesCountPow2; // DURCH 2 HÖCHSTWAHRSCHEINLICH HIER GUCKEN!!!
+            _2_curInputSize = (ulong)sortIndicesCountPow2;
             while (_2_curInputSize > 2048) // teile solange durch 2048, bis ein Wert kleiner als 2048 herauskommt, das ist die inputSize für den ersten Dispatch
             {
                 _2_curInputSize /= 2048;
             }
             int _2_curWorkSize = (int)_2_curInputSize / 2;
             _2_curThreadDistance = sortIndicesCountPow2 / _2_curWorkSize; // * 2, weil ein Thread ja am Ende 2 Inputs bearbeitet, die Distanz ist also doppelt so groß
-            _2_curLoops = (int)log2(_2_curInputSize);// curInputSize wird nicht durch 2 geteilt, da log2 ja die Basis 2 hat, wir aber am Ende auf 1 kommen wollen, also das Ergebnis nochmal durch 2 teilen
+            _2_curLoops = (int)Log2((int)_2_curInputSize);// curInputSize wird nicht durch 2 geteilt, da log2 ja die Basis 2 hat, wir aber am Ende auf 1 kommen wollen, also das Ergebnis nochmal durch 2 teilen
             bool firstStep = true;
-            while (_2_curInputSize <= (UINT)sortIndicesCountPow2) // beim letzten Schritt ist die inputSize = m_SortIndicesCount, deswegen das <=
+            while (_2_curInputSize <= (uint)sortIndicesCountPow2) // beim letzten Schritt ist die inputSize = m_SortIndicesCount, deswegen das <=
             {
-                int groupCount = (int)ceil(_2_curWorkSize / 1024.0f);
-                RadixSort_ExclusivePrefixSumData2 radixSort_ExclusivePrefixSum_Data2 = { (UINT)firstStep, _2_curThreadDistance, _2_curLoops, read2BitsFromHere };
-                deviceContext->UpdateSubresource(m_RadixSort_ExclusivePrefixSumData2_CBuffer, 0, NULL, &radixSort_ExclusivePrefixSum_Data2, 0, 0);
-                deviceContext->CSSetConstantBuffers(0, 1, &m_RadixSort_ExclusivePrefixSumData2_CBuffer);
-                deviceContext->Dispatch(groupCount, 1, 1);
+                groupCount = (int)Mathf.Ceil(_2_curWorkSize / 1024.0f);
+
+                int iFirstStep = 0;
+                if (firstStep) iFirstStep = 1;
+                m_CurComputeShader.SetInt("bool_firstStep", iFirstStep);
+                m_CurComputeShader.SetInt("threadDistance", _2_curThreadDistance);
+                m_CurComputeShader.SetInt("loops", _2_curLoops);
+                m_CurComputeShader.SetInt("read2BitsFromHere", read2BitsFromHere);
+
+                m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
+
                 _2_curInputSize *= 2048;
                 _2_curWorkSize = (int)_2_curInputSize / 2;
                 _2_curThreadDistance /= 2048;
@@ -669,32 +670,26 @@ public class CollisionDetectionManager {
                 firstStep = false;
             }
 
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-            deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-
             // ####################################################_8_3_####################################################
             // sortiere mit Hilfe der exklusiven Prefix-Summen
-            m_curComputeShader = m_ComputeShaderVector[9];
-            deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+            m_CurComputeShader = m_ComputeShaderList[9];
+            kernelID = m_CurComputeShader.FindKernel("main");
 
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_SortIndices_UAV, 0);
+            m_CurComputeShader.SetBuffer(kernelID, "sortIndices", m_SortIndices_Buffer);
+
             if (backBufferIsInput)
             {
-                deviceContext->CSSetUnorderedAccessViews(1, 1, &m_CellTrianglePairsBackBuffer_UAV, 0);
-                deviceContext->CSSetUnorderedAccessViews(2, 1, &m_CellTrianglePairs_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairsInput", m_CellTrianglePairsBackBuffer_Buffer);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairsOutput", m_CellTrianglePairs_Buffer);
             }
             else
             {
-                deviceContext->CSSetUnorderedAccessViews(1, 1, &m_CellTrianglePairs_UAV, 0);
-                deviceContext->CSSetUnorderedAccessViews(2, 1, &m_CellTrianglePairsBackBuffer_UAV, 0);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairsInput", m_CellTrianglePairs_Buffer);
+                m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairsOutput", m_CellTrianglePairsBackBuffer_Buffer);
             }
 
-            int groupCount = (int)ceil(m_CellTrianglePairsCount / 1024.0f);
-            deviceContext->Dispatch(groupCount, 1, 1);
-
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-            deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-            deviceContext->CSSetUnorderedAccessViews(2, 1, &m_NULL_UAV, 0);
+            groupCount = (int)Mathf.Ceil(m_CellTrianglePairsCount / 1024.0f);
+            m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
 
             backBufferIsInput = !backBufferIsInput;
             read2BitsFromHere += 2;
@@ -706,116 +701,61 @@ public class CollisionDetectionManager {
     // ******* 9. Finde im sortierten cellTrianglePairsBuffer alle Dreieckspaare, deren Bounding Boxes sich überschneiden *******
     void _9_FindTrianglePairs(bool backBufferIsInput)
     {
-        m_curComputeShader = m_ComputeShaderVector[10];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
-
-        UINT zero = 0;
+        m_CurComputeShader = m_ComputeShaderList[10];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
         if (backBufferIsInput)
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CellTrianglePairsBackBuffer_UAV, 0);
+            m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairsBackBuffer_Buffer);
+
         else
-            deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CellTrianglePairs_UAV, 0);
+            m_CurComputeShader.SetBuffer(kernelID, "cellTrianglePairs", m_CellTrianglePairs_Buffer);
 
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_BoundingBoxes_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_TrianglePairs_UAV, &zero); // setze den Buffer-Counter auf 0 zurück
-
-
-        int groupCount = (int)ceil(m_TrianglePairsCount / 1024.0);
-        deviceContext->Dispatch(groupCount, 1, 1);
-
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_NULL_UAV, 0);
+        m_CurComputeShader.SetBuffer(kernelID, "boundingBoxes", m_BoundingBox_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "trianglePairs", m_TrianglePairs_Buffer);
+        m_TrianglePairs_Buffer.SetCounterValue(0);
 
 
-        deviceContext->UpdateSubresource(m_CellTrianglePairs_Buffer, 0, NULL, m_CellTrianglePairs_Zero, m_CellTrianglePairsCount * sizeof(CellTrianglePair), 0);
-        deviceContext->UpdateSubresource(m_CellTrianglePairsBackBuffer_Buffer, 0, NULL, m_CellTrianglePairs_Zero, m_CellTrianglePairsCount * sizeof(CellTrianglePair), 0);
-        //Arguments: The buffer, The subresource (0), A destination box(NULL), The data to write to the buffer, the size of the buffer, the depth of the buffer
+        int groupCount = (int)Mathf.Ceil(m_TrianglePairsCount / 1024.0f);
+        m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
+
+        m_CellTrianglePairs_Buffer.SetData(m_CellTrianglePairs_Zero);
+        m_CellTrianglePairsBackBuffer_Buffer.SetData(m_CellTrianglePairs_Zero);
     }
 
     // ******* 10. Überprüfe alle Dreiecke in Triangle-Pairs, ob sie sich tatsächlich überschneiden  *******
     void _10_TriangleIntersections()
     {
-        m_curComputeShader = m_ComputeShaderVector[11];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[11];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
-        deviceContext->CSSetShaderResources(0, 1, &m_Vertices_SRV);
-        deviceContext->CSSetShaderResources(1, 1, &m_Triangles_SRV);
+        m_CurComputeShader.SetBuffer(kernelID, "vertexBuffer", m_Vertex_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "triangleBuffer", m_Triangle_Buffer);
 
-        UINT zero = 0;
+        m_CurComputeShader.SetBuffer(kernelID, "trianglePairs", m_TrianglePairs_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "intersectingObjects", m_IntersectingObjects_Buffer);
+        m_CurComputeShader.SetBuffer(kernelID, "intersectCenters", m_IntersectCenters_Buffer);
+        m_IntersectCenters_Buffer.SetCounterValue(0);
 
-        //deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CellTrianglePairs_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_TrianglePairs_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_IntersectingObjects_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_IntersectCenters_UAV, &zero); // setzte den Buffer-internen Counter auf 0 zurück
-
-        int groupCount = (int)ceil(m_TrianglePairsCount / 1024.0);
-        deviceContext->Dispatch(groupCount, 1, 1);
-
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-        deviceContext->CSSetUnorderedAccessViews(2, 1, &m_NULL_UAV, 0);
-
+        int groupCount = (int)Mathf.Ceil(m_TrianglePairsCount / 1024.0f);
+        m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
     }
 
     // ******* 11. Überschreibe den Ergebnis-Buffer mit 0en  *******
     void _11_ZeroIntersectionCenters()
     {
-        m_curComputeShader = m_ComputeShaderVector[12];
-        deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
+        m_CurComputeShader = m_ComputeShaderList[12];
+        int kernelID = m_CurComputeShader.FindKernel("main");
 
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_IntersectCenters_UAV, 0); // setzte den Buffer-internen Counter auf 0 zurück
+        m_CurComputeShader.SetBuffer(kernelID, "intersectCenters", m_IntersectCenters_Buffer);
 
-        int groupCount = (int)ceil(m_TrianglePairsCount / 1024.0);
-        deviceContext->Dispatch(groupCount, 1, 1);
-
-        deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
+        int groupCount = (int)Mathf.Ceil(m_TrianglePairsCount / 1024.0f);
+        m_CurComputeShader.Dispatch(kernelID, groupCount, 1, 1);
     }
 
     void _10_TriangleIntersections_GetFinalResult()
     {
-        SAFEDELETEARRAY(m_Results10_1_IntersectingObjects);
-        m_Results10_1_IntersectingObjects = new UINT[m_ObjectCount];
-        D3D11_MAPPED_SUBRESOURCE MappedResource10_1 = { 0 };
-        deviceContext->CopyResource(m_IntersectingObjects_Result_Buffer, m_IntersectingObjects_Buffer);
-        deviceContext->Map(m_IntersectingObjects_Result_Buffer, 0, D3D11_MAP_READ, 0, &MappedResource10_1);
-        _Analysis_assume_(MappedResource10_1.pData);
-        assert(MappedResource10_1.pData);
-        memcpy(m_Results10_1_IntersectingObjects, MappedResource10_1.pData, m_ObjectCount * sizeof(UINT));
-        deviceContext->Unmap(m_IntersectingObjects_Result_Buffer, 0);
-
-
-        D3D11_MAPPED_SUBRESOURCE MappedResource10_2 = { 0 };
-
-        if (m_CopyTo1)
-        {
-            deviceContext->CopyResource(m_IntersectCenters_Result1_Buffer, m_IntersectCenters_Buffer);
-            deviceContext->Map(m_IntersectCenters_Result2_Buffer, 0, D3D11_MAP_READ, 0, &MappedResource10_2);
-        }
-        else
-        {
-            deviceContext->CopyResource(m_IntersectCenters_Result2_Buffer, m_IntersectCenters_Buffer);
-            deviceContext->Map(m_IntersectCenters_Result1_Buffer, 0, D3D11_MAP_READ, 0, &MappedResource10_2);
-        }
-
-        _Analysis_assume_(MappedResource10_2.pData);
-        assert(MappedResource10_2.pData);
-        m_Results10_2_IntersectionPoints = (Vertex*)MappedResource10_2.pData;
-        if (m_CopyTo1)
-            deviceContext->Unmap(m_IntersectCenters_Result2_Buffer, 0);
-        else
-            deviceContext->Unmap(m_IntersectCenters_Result1_Buffer, 0);
-
-
-        /*int i = 0;
-        for (i = 0; i < m_IntersectionCentersCount; i++)
-        {
-            if (m_Results10_2_IntersectionPoints[i].x == 0 && m_Results10_2_IntersectionPoints[i].y == 0 && m_Results10_2_IntersectionPoints[i].z == 0)
-                break;
-        }
-        cout << "intersectionPoints : " << i << endl;*/
-
-
+        m_IntersectingObjects_Buffer.GetData(m_Results10_1_IntersectingObjects);
+        m_IntersectCenters_Buffer.GetData(m_Results10_2_IntersectionPoints);
     }
 
     // führe die Kollisionsberechnung für das aktuelle Frame durch
@@ -851,97 +791,4 @@ public class CollisionDetectionManager {
 
         m_CopyTo1 = !m_CopyTo1;
     }
-
-    public void FrameOld()
-    {
-        
-        
-
-        
-        // solange mehr als eine Gruppe gestartet werden muss, werden die Min-MaxPoints nicht auf ein Ergebnis reduziert sein,
-        // da es ja immer ein Ergebnis pro Gruppe berechnet wird
-
-
-        ////####### Daten von der GPU kopieren #######
-        //SAFEDELETEARRAY(m_Results2_1);
-        //SAFEDELETEARRAY(m_Results2_2);
-
-        //m_Results2_1 = new Vertex[m_GroupResult_Count];
-        //m_Results2_2 = new Vertex[m_GroupResult_Count];
-
-        //D3D11_MAPPED_SUBRESOURCE MappedResource1 = { 0 };
-        //D3D11_MAPPED_SUBRESOURCE MappedResource2 = { 0 };
-        //deviceContext->CopyResource(m_Result_Buffer2_1, m_GroupMinPoint_Buffer);
-        //deviceContext->CopyResource(m_Result_Buffer2_2, m_GroupMaxPoint_Buffer);
-        //HRESULT result = deviceContext->Map(m_Result_Buffer2_1, 0, D3D11_MAP_READ, 0, &MappedResource1);
-        //result = deviceContext->Map(m_Result_Buffer2_2, 0, D3D11_MAP_READ, 0, &MappedResource2);
-
-        //RETURN_FALSE_IF_FAIL(result);
-
-        //_Analysis_assume_(MappedResource1.pData);
-        //assert(MappedResource1.pData);
-
-        //_Analysis_assume_(MappedResource2.pData);
-        //assert(MappedResource2.pData);
-        //// m_BoundingBoxes wird in CreateVertexAndTriangleArray neu initialisiert
-        //memcpy(m_Results2_1, MappedResource1.pData, m_GroupResult_Count * sizeof(Vertex));
-        //memcpy(m_Results2_2, MappedResource2.pData, m_GroupResult_Count * sizeof(Vertex));
-        //deviceContext->Unmap(m_Result_Buffer2_1, 0);
-        //deviceContext->Unmap(m_Result_Buffer2_2, 0);
-
-        //end = high_resolution_clock::now();
-        ////cout << "Shader 1 + 2 (+ copy-back): " << duration_cast<milliseconds>(end - begin).count() << "ms" << endl;
-        //begin = high_resolution_clock::now();
-
-
-        // ####### Befülle Countertrees mit den Daten für jedes Objekt #######
-
-        
-
-        //// entferne die UAVs wieder von den Slots 0 - 2, damit sie wieder verwendet werden können
-        //deviceContext->CSSetUnorderedAccessViews(0, 1, &m_NULL_UAV, 0);
-        //deviceContext->CSSetUnorderedAccessViews(1, 1, &m_NULL_UAV, 0);
-        //deviceContext->CSSetUnorderedAccessViews(2, 1, &m_NULL_UAV, 0);
-        //deviceContext->CSSetUnorderedAccessViews(3, 1, &m_NULL_UAV, 0);
-
-        ////####### Daten von der GPU kopieren #######
-        ////SAFEDELETEARRAY(m_Results3);
-        ////m_Results3 = new UINT[m_CounterTreesSize];
-        ////D3D11_MAPPED_SUBRESOURCE MappedResource3 = { 0 };
-        ////deviceContext->CopyResource(m_Result_Buffer3, m_CounterTrees_Buffer);
-        ////HRESULT result = deviceContext->Map(m_Result_Buffer3, 0, D3D11_MAP_READ, 0, &MappedResource3);
-        ////RETURN_FALSE_IF_FAIL(result);
-        ////_Analysis_assume_(MappedResource3.pData);
-        ////assert(MappedResource3.pData);
-        ////// m_BoundingBoxes wird in CreateVertexAndTriangleArray neu initialisiert
-        ////memcpy(m_Results3, MappedResource3.pData, m_CounterTreesSize * sizeof(UINT));
-        ////deviceContext->Unmap(m_Result_Buffer3, 0);
-        ////####### Daten von der GPU kopieren #######
-
-        //// ####### Befülle den GlobalCounterTree mit den Daten, wie viele Überschneidungstets es pro Zelle gibt #######
-
-        //m_curComputeShader = m_ComputeShaderVector[3];
-        //deviceContext->CSSetShader(m_curComputeShader, NULL, 0);
-
-        //deviceContext->CSSetUnorderedAccessViews(0, 1, &m_CounterTrees_UAV, 0);
-        //deviceContext->CSSetUnorderedAccessViews(1, 1, &m_GlobalCounterTree_UAV, 0);
-        //deviceContext->CSSetConstantBuffers(0, 1, &m_FillCounterTreesData_CBuffer);
-        //xThreadGroups = (int)ceil(m_TreeSize / 1024.0f);
-        //deviceContext->Dispatch(xThreadGroups, 1, 1);
-
-        ////####### Daten von der GPU kopieren #######
-        //SAFEDELETEARRAY(m_Results4);
-        //m_Results4 = new UINT[m_TreeSize];
-        //D3D11_MAPPED_SUBRESOURCE MappedResource4 = { 0 };
-        //deviceContext->CopyResource(m_Result_Buffer4, m_GlobalCounterTree_Buffer);
-        //HRESULT result = deviceContext->Map(m_Result_Buffer4, 0, D3D11_MAP_READ, 0, &MappedResource4);
-        //RETURN_FALSE_IF_FAIL(result);
-        //_Analysis_assume_(MappedResource4.pData);
-        //assert(MappedResource4.pData);
-        //// m_BoundingBoxes wird in CreateVertexAndTriangleArray neu initialisiert
-        //memcpy(m_Results4, MappedResource4.pData, m_TreeSize * sizeof(UINT));
-        //deviceContext->Unmap(m_Result_Buffer4, 0);
-        ////####### Daten von der GPU kopieren #######
-    }
-
 }
